@@ -318,6 +318,8 @@ def render(
         fast=fast,
         actual_value=execution_directory,
     )
+    if isinstance(execution_directory, str):
+        execution_directory = pathlib.Path(execution_directory).resolve()
 
     try:
         job_submission_result = create_job_submission(
@@ -331,7 +333,7 @@ def render(
         )
     except Exception as err:
         raise Abort(
-            "Failed to immediately submit the job after job script creation.",
+            f"Failed to immediately submit the job after job script creation. {str(err)}",
             subject="Automatic job submission failed",
             support=True,
             log_message=f"""

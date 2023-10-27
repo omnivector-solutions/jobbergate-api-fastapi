@@ -2,14 +2,36 @@
 Provide tool functions for working with Job Submission data
 """
 
+import os
+import re
 from pathlib import Path
+from subprocess import PIPE, Popen
 from typing import Optional, cast
+
+from loguru import logger
 
 from jobbergate_cli.config import settings
 from jobbergate_cli.exceptions import Abort
 from jobbergate_cli.requests import make_request
 from jobbergate_cli.schemas import JobbergateContext, JobSubmissionCreateRequestData, JobSubmissionResponse
-from jobbergate_cli.subapps.job_scripts.tools import validate_parameter_file
+from jobbergate_cli.subapps.job_scripts.tools import download_job_script_files, validate_parameter_file
+
+
+SBATCH_PATH = os.environ.get("SBATCH_PATH", "/usr/bin/sbatch")
+
+
+def jobbergate_run(filename, *argv):
+    """Execute Job Submission."""
+    cmd = [SBATCH_PATH, filename]
+    for arg in argv:
+        cmd.append(arg)
+    logger.debug(f"Executing: {''.join(cmd)}")
+    p = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    output, err = p.communicate(b"sbatch output")
+
+    rc = p.returncode
+
+    return output.decode("utf-8"), err.decode("utf-8"), rc
 
 
 def create_job_submission(
@@ -56,19 +78,35 @@ def create_job_submission(
         ),
     )
 
+    if execution_directory is None:
+        execution_directory = Path.cwd()
+
+    files = download_job_script_files(job_script_id, jg_ctx)
+    output, err, rc = jobbergate_run(files.pop().as_posix(), name)
+
+    logger.debug(f"Job submission output: {output}")
+    logger.debug(f"Job submission error: {err}")
+    logger.debug(f"Job submission return code: {rc}")
+
+    Abort.require_condition(
+        rc == 0,
+        f"Failed to execute submission with error: {err}",
+        raise_kwargs=dict(
+            subject="sbatch error",
+            support=False,
+        ),
+    )
+
+    match = re.search(r"^Submitted batch job (\d+)", output)
+    slurm_job_id = int(match.group(1)) if match else None
+
     job_submission_data = JobSubmissionCreateRequestData(
         name=name,
         description=description,
         job_script_id=job_script_id,
-        cluster_name=cluster_name,
+        cluster_name="sbatch-from-cli",
+        execution_directory=execution_directory.resolve(),
     )
-
-    if execution_directory is None:
-        execution_directory = Path.cwd()
-    else:
-        if not execution_directory.is_absolute():
-            execution_directory = (Path.cwd() / execution_directory).resolve()
-    job_submission_data.execution_directory = execution_directory
 
     if execution_parameters_file is not None:
         job_submission_data.execution_parameters = validate_parameter_file(execution_parameters_file)
@@ -86,6 +124,8 @@ def create_job_submission(
             response_model_cls=JobSubmissionResponse,
         ),
     )
+
+    result.slurm_job_id = slurm_job_id
     return result
 
 
